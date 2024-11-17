@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document</title>
+    <link rel="stylesheet" href= "{{ url_for('static',filename='styles/index.css') }}">
+</head>
+<body>
+    <h1>Where are my keys</h1>
+    <div class = "video-container">
+        <video id="vid" controls></video>
+            <source src="{{ url_for('static', filename='videos/sample.mp4') }}" type="video/mp4">
+        </video>
+    </div>
+    <script>
+        // Access the camera and set the video stream
+        async function startCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { facingMode: 'environment' } // Use the environment-facing camera (back camera)
+                });
+
+                const videoElement = document.getElementById('vid');
+                videoElement.srcObject = stream;
+                videoElement.play();
+            } catch (error) {
+                console.error('Error accessing the camera: ', error);
+            }
+        }
+
+        // Start the camera when the page loads
+        startCamera();
+    </script>
+    
+    <input type="text" id="searchInput">
+    <button id="micBtn">🎤</button>
+    <button id="search">Search</button>
+<script>
+    document.getElementById('search').addEventListener('click', async function() {
+        const searchInput = document.getElementById('searchInput').value;
+        try {
+                const response = await fetch('http://127.0.0.1:5000/run-script', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json', // Tell the server we're sending JSON
+                    },
+                    body: JSON.stringify({ searchInput }),
+
+                });
+                const result = await response.json();
+                alert(result.message);
+            } catch (error) {
+                console.error('Error:', error);
+                alert('Failed to execute the script.');
+            }
+    });
+
+     // Check for browser support of Web Speech API
+     if (!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) {
+            alert('Your browser does not support the Speech Recognition API. Please use a modern browser like Chrome.');
+    } else {
+        // Use webkitSpeechRecognition for Chrome
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        const recognition = new SpeechRecognition();
+
+        // Configure the recognition
+        recognition.lang = 'en-US'; // Set the language (e.g., 'en-US' for English)
+        recognition.interimResults = true; // Only return final results
+        recognition.maxAlternatives = 1; // Limit to one transcription
+
+        const textInput = document.getElementById('searchInput');
+        const startBtn = document.getElementById('micBtn');
+
+        startBtn.addEventListener('click', () => {
+            recognition.start(); // Start listening
+        });
+
+        // Handle successful recognition
+        recognition.onresult = (event) => {
+            const transcript = event.results[0][0].transcript; // Get the transcribed text
+            textInput.value = transcript; // Set the text input value
+            console.log('Transcript:', transcript);
+        };
+
+        // Handle errors
+        recognition.onerror = (event) => {
+            console.error('Speech recognition error:', event.error);
+            alert(`Speech recognition error: ${event.error}`);
+        };
+
+        // Handle end of recognition
+        recognition.onend = () => {
+            console.log('Speech recognition stopped.');
+        };
+    }
+</script>
+</body>
+</html>
