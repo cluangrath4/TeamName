@@ -1,212 +1,220 @@
 import cv2
-from google.cloud import vision
+from ultralytics import YOLO
 import time
 import numpy as np
-import io
-from PIL import Image
-import os
+import platform
+import threading
+from queue import Queue
 
-class GoogleVisionObjectFinder:
-    def __init__(self, camera_id=0):
-        """Initialize Google Vision client and camera."""
-        print("Initializing Google Vision API...")
-        self.client = vision.ImageAnnotatorClient()
-        self.camera_id = camera_id
-        self.capture = None
+# Operating system specific sound implementations
+if platform.system() == 'Windows':
+    import winsound
+    def beep():
+        """Generate a beep sound using Windows native sound."""
+        winsound.Beep(1000, 100)  # 1000Hz frequency, 100ms duration
+else:
+    try:
+        from beepy import beep as make_beep
+        def beep():
+            """Generate a beep sound using beepy library."""
+            make_beep(sound=1)  # Sound type 1 = 'ping'
+    except ImportError:
+        print("Installing beepy for sound...")
+        import os
+        os.system('pip install beepy')
+        from beepy import beep as make_beep
+        def beep():
+            make_beep(sound=1)
+
+class YOLOUltraFast:
+    """
+    A high-performance real-time object detection class using YOLOv8.
+    Optimized for speed with minimal processing and optional sound alerts.
+    """
+    
+    def __init__(self):
+        """Initialize the YOLO detector with minimal settings for maximum speed."""
+        print("Loading minimal YOLO model...")
+        try:
+            # Load the smallest YOLO model for maximum speed
+            self.model = YOLO('yolov8n-cls.pt')
+            self.model.fuse()  # Fuse model layers for faster inference
+            print("Model loaded!")
+        except Exception as e:
+            print(f"Error: {e}")
+            raise
         
-        # Detection settings
-        self.confidence_threshold = 0.5
-        self.skip_frames = 2
-        self.frame_counter = 0
-        self.target_object = None
+        # Core settings
+        self.capture = None  # Camera capture object
+        self.frame_size = (240, 320)  # Minimal resolution for speed
+        self.confidence_threshold = 0.25  # Minimum confidence for detections
+        self.last_inference_time = 0  # Track last inference time
+        self.inference_interval = 0.1  # Run inference every 100ms
         
-        # Cache of common household objects for quick lookup
-        self.common_objects = {
-            'keys': ['key', 'keys', 'car key', 'house key'],
-            'remote': ['remote', 'remote control', 'tv remote', 'controller'],
-            'phone': ['mobile phone', 'cell phone', 'smartphone', 'iphone', 'android phone'],
-            'wallet': ['wallet', 'purse', 'billfold'],
-            'glasses': ['glasses', 'eyeglasses', 'sunglasses', 'spectacles'],
-            'watch': ['watch', 'wristwatch', 'smartwatch'],
-            'charger': ['charger', 'power adapter', 'cable'],
-            'headphones': ['headphones', 'earbuds', 'airpods'],
-            'pen': ['pen', 'pencil', 'marker'],
-            'notebook': ['notebook', 'notepad', 'journal']
-        }
+        # Object detection settings
+        self.target_object = None  # Object to search for
+        self.last_beep_time = 0  # Track last beep time
+        self.beep_cooldown = 1.0  # Minimum seconds between beeps
         
+        # Initialize sound queue and thread
+        self.sound_queue = Queue()
+        self.sound_thread = threading.Thread(target=self._sound_worker, daemon=True)
+        self.sound_thread.start()
+    
+    def _sound_worker(self):
+        """
+        Background worker thread for handling sound alerts.
+        Prevents sound playback from blocking video processing.
+        """
+        while True:
+            _ = self.sound_queue.get()  # Wait for sound trigger
+            current_time = time.time()
+            if current_time - self.last_beep_time >= self.beep_cooldown:
+                beep()
+                self.last_beep_time = current_time
+            self.sound_queue.task_done()
+    
     def initialize_camera(self):
-        """Initialize camera with stable settings."""
-        print("Initializing camera...")
-        
+        """
+        Initialize the camera with optimized settings for speed.
+        Returns:
+            bool: True if camera initialized successfully
+        """
         if self.capture is not None:
             self.capture.release()
         
-        self.capture = cv2.VideoCapture(self.camera_id)
-        
+        self.capture = cv2.VideoCapture(0)
         if not self.capture.isOpened():
-            raise RuntimeError("Error: Could not open camera.")
+            raise RuntimeError("Camera error")
         
-        # Set higher resolution for better object detection
-        self.capture.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        self.capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        # Set minimal camera properties for maximum speed
+        self.capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.frame_size[1])
+        self.capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.frame_size[0])
         self.capture.set(cv2.CAP_PROP_FPS, 30)
-        
-        # Verify settings
-        actual_width = self.capture.get(cv2.CAP_PROP_FRAME_WIDTH)
-        actual_height = self.capture.get(cv2.CAP_PROP_FRAME_HEIGHT)
-        actual_fps = self.capture.get(cv2.CAP_PROP_FPS)
-        
-        print(f"Camera initialized at {actual_width}x{actual_height} @ {actual_fps}fps")
+        self.capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Minimal buffer size
         
         return True
 
-    def detect_objects(self, image):
-        """Detect objects in image using Google Vision API."""
-        # Convert the image to bytes
-        success, encoded_image = cv2.imencode('.jpg', image)
-        if not success:
-            return []
+    def process_frame(self, frame, current_fps, class_name=None):
+        """
+        Process a single frame with minimal overhead.
+        
+        Args:
+            frame: Current video frame
+            current_fps: Current frames per second
+            class_name: Name of detected object (if any)
+        
+        Returns:
+            processed_frame: Frame with overlaid information
+        """
+        # Add FPS counter
+        cv2.putText(frame, 
+                   f"FPS:{current_fps:.1f}", 
+                   (5, 20), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 
+                   0.5, 
+                   (0, 255, 0), 
+                   1)
+        
+        # Add detection results if available
+        if class_name:
+            # Check if detected object matches target
+            if self.target_object and self.target_object.lower() in class_name.lower():
+                color = (0, 0, 255)  # Red for target object
+                self.sound_queue.put(1)  # Trigger beep
+            else:
+                color = (255, 255, 255)  # White for other objects
             
-        content = encoded_image.tobytes()
-        image = vision.Image(content=content)
+            # Add object name to frame
+            cv2.putText(frame, 
+                      class_name, 
+                      (5, frame.shape[0] - 10), 
+                      cv2.FONT_HERSHEY_SIMPLEX, 
+                      0.5, 
+                      color, 
+                      1)
         
-        # Perform object detection
-        objects = self.client.object_localization(image=image).localized_object_annotations
-        
-        return objects
-
-    def is_target_object(self, detected_name):
-        """Check if detected object matches target, including variations."""
-        detected_name = detected_name.lower()
-        
-        # Check direct match
-        if detected_name == self.target_object.lower():
-            return True
-            
-        # Check variations from common objects dictionary
-        for key, variations in self.common_objects.items():
-            if self.target_object.lower() in variations:
-                if detected_name in variations:
-                    return True
-                
-        return False
-
-    def draw_target_alert(self, frame, object_info):
-        """Draw attention-grabbing alert when target object is found."""
-        # Get bounding box vertices
-        vertices = [(vertex.x * frame.shape[1], vertex.y * frame.shape[0]) 
-                   for vertex in object_info.bounding_poly.normalized_vertices]
-        
-        # Convert to integers
-        vertices = [(int(x), int(y)) for x, y in vertices]
-        
-        # Draw polygon
-        for i in range(len(vertices)):
-            cv2.line(frame, vertices[i], vertices[(i+1)%len(vertices)], (0, 0, 255), 3)
-        
-        # Add pulsing effect
-        overlay = frame.copy()
-        cv2.fillPoly(overlay, [np.array(vertices)], (0, 0, 255))
-        pulse = (np.sin(time.time() * 8) + 1) / 2
-        cv2.addWeighted(overlay, 0.3 * pulse, frame, 1 - 0.3 * pulse, 0, frame)
-        
-        # Draw confidence
-        confidence = f"{object_info.score * 100:.1f}%"
-        cv2.putText(frame, f"{object_info.name}: {confidence}", 
-                   (vertices[0][0], vertices[0][1] - 10),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-        
-        # Draw "TARGET FOUND" text
-        cv2.putText(frame, "TARGET FOUND!", 
-                   (frame.shape[1]//2 - 100, 50),
-                   cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
+        return frame
 
     def run_detection(self):
-        """Run object detection loop."""
+        """
+        Main detection loop. Captures frames, runs inference, and displays results.
+        Handles user input and maintains performance optimizations.
+        """
         try:
             if self.capture is None:
                 self.initialize_camera()
             
-            # Print available common objects
-            print("\nCommon household objects you can search for:")
-            for obj, variations in self.common_objects.items():
-                print(f"- {obj} ({', '.join(variations)})")
+            # Get user preferences
+            print("\nDo you want to:")
+            print("1. Search for specific object (with beep alert)")
+            print("2. Show all detected objects")
+            mode = input("Choose mode (1 or 2): ").strip()
             
-            # Get target object from user
-            self.target_object = input("\nWhat object would you like to find? ").lower().strip()
+            if mode == "1":
+                self.target_object = input("\nWhat object would you like to find? ").lower().strip()
+                print(f"\nLooking for {self.target_object}...")
+                print("Will beep when object is detected!")
             
-            print(f"\nLooking for {self.target_object}...")
-            print("Press 'q' to quit, 's' to save a photo")
+            print("\nPress 'q' to quit, 'n' for new search")
             
-            last_frame_time = time.time()
-            last_api_call_time = 0
-            api_call_interval = 1.0  # Minimum seconds between API calls
+            # Performance tracking
+            frame_times = []
+            last_prediction = None
             
             while True:
-                try:
-                    # Frame rate control
-                    if time.time() - last_frame_time < 0.033:
-                        time.sleep(0.01)
+                # Capture frame
+                ret, frame = self.capture.read()
+                if not ret:
+                    continue
+                
+                # Track FPS
+                current_time = time.time()
+                frame_times.append(current_time)
+                frame_times = [t for t in frame_times if current_time - t <= 1.0]
+                current_fps = len(frame_times)
+                
+                # Run inference at specified intervals
+                if current_time - self.last_inference_time >= self.inference_interval:
+                    try:
+                        results = self.model(frame, verbose=False)
+                        last_prediction = results[0].probs.top1
+                        self.last_inference_time = current_time
+                    except Exception as e:
+                        print(f"Inference error: {e}")
                         continue
-                    
-                    ret, frame = self.capture.read()
-                    if not ret or frame is None:
-                        print("Failed to capture frame.")
-                        continue
-                    
-                    last_frame_time = time.time()
-                    self.frame_counter += 1
-                    
-                    # Only call API periodically to avoid rate limits
-                    current_time = time.time()
-                    if current_time - last_api_call_time >= api_call_interval:
-                        # Detect objects using Google Vision API
-                        objects = self.detect_objects(frame)
-                        last_api_call_time = current_time
-                        
-                        # Process detections
-                        target_found = False
-                        for obj in objects:
-                            if self.is_target_object(obj.name):
-                                target_found = True
-                                self.draw_target_alert(frame, obj)
-                        
-                        if not target_found:
-                            cv2.putText(frame, f"Searching for {self.target_object}...",
-                                      (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
-                                      1, (0, 255, 0), 2)
-                    
-                    # Display frame
-                    cv2.imshow('Object Finder', frame)
-                    
-                    # Handle key presses
-                    key = cv2.waitKey(1) & 0xFF
-                    if key == ord('q'):
-                        print("Quitting...")
-                        break
-                    elif key == ord('s'):
-                        filename = f'found_{self.target_object}_{time.strftime("%Y%m%d-%H%M%S")}.jpg'
-                        cv2.imwrite(filename, frame)
-                        print(f"Saved image as {filename}")
-                    
-                except Exception as e:
-                    print(f"Error in detection loop: {e}")
-                    time.sleep(0.1)
-                    
+                
+                # Get class name if available
+                class_name = None
+                if last_prediction is not None:
+                    class_name = self.model.names[int(last_prediction)]
+                
+                # Process and display frame
+                frame = self.process_frame(frame, current_fps, class_name)
+                cv2.imshow('Ultra Fast', frame)
+                
+                # Handle user input
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
+                    break
+                elif key == ord('n'):
+                    self.target_object = input("\nWhat object would you like to find? ").lower().strip()
+                    print(f"\nLooking for {self.target_object}...")
+                
         finally:
             self.cleanup()
     
     def cleanup(self):
-        """Release resources and close windows."""
-        print("Cleaning up...")
+        """Release all resources and close windows."""
         if self.capture is not None:
             self.capture.release()
         cv2.destroyAllWindows()
 
 def main():
+    """Main entry point of the application."""
     try:
-        finder = GoogleVisionObjectFinder()
-        finder.run_detection()
+        detector = YOLOUltraFast()
+        detector.run_detection()
     except Exception as e:
         print(f"Error occurred: {e}")
         import traceback
